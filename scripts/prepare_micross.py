@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import csv
 import io
+import math
 import re
 import shutil
 import subprocess
@@ -95,8 +96,8 @@ def parse_args() -> argparse.Namespace:
         help="Directory containing run_table_YYYY-MM.csv files",
     )
     args = parser.parse_args()
-    if args.window_seconds <= 0 or 60 % args.window_seconds:
-        parser.error("--window-seconds must be a positive divisor of 60")
+    if args.window_seconds != 60:
+        parser.error("only 60-second windows are supported because labels target the next minute")
     return args
 
 
@@ -184,6 +185,8 @@ def aggregate_metrics(
                             timestamp = int(row["timestamp"]) // 1000
                             value = float(row["value"])
                         except (KeyError, TypeError, ValueError):
+                            continue
+                        if not math.isfinite(value):
                             continue
                         bucket = minute_epoch(timestamp, bucket_seconds)
                         aggregate = per_bucket[bucket]

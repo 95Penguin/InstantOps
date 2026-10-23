@@ -31,9 +31,8 @@ class InstantOpsGNNGRU(nn.Module):
       node_features: [batch, time, services, feature_dim]
       adjacency:     [batch, time, services, services]
 
-    Outputs include application-level failure logits and per-service scores.
-    The initial implementation deliberately keeps dataset parsing and label
-    conventions outside the model.
+    The node head is supervised with the available GAIA injection-start labels;
+    it is a root-cause proxy head, not an SLA ground-truth RCA model.
     """
 
     def __init__(
@@ -59,8 +58,13 @@ class InstantOpsGNNGRU(nn.Module):
             raise ValueError("node_features must have shape [B, T, N, F]")
         if adjacency.ndim != 4:
             raise ValueError("adjacency must have shape [B, T, N, N]")
-        if node_features.shape[:3] != adjacency.shape[:3] or adjacency.shape[-1] != node_features.shape[2]:
-            raise ValueError("node_features and adjacency batch/time/node dimensions must match")
+        if (
+            node_features.shape[:3] != adjacency.shape[:3]
+            or adjacency.shape[-1] != node_features.shape[2]
+        ):
+            raise ValueError(
+                "node_features and adjacency batch/time/node dimensions must match"
+            )
 
         batch, steps, services, _ = node_features.shape
         spatial = self.graph_conv(
@@ -77,8 +81,10 @@ class InstantOpsGNNGRU(nn.Module):
 
         # Pool node states for application-level failure prediction.
         app_state = final_nodes.mean(dim=1)
+        node_logits = self.node_score_head(final_nodes).squeeze(-1)
         return {
             "failure_logits": self.failure_head(app_state),
-            "node_scores": self.node_score_head(final_nodes).squeeze(-1),
+            "node_logits": node_logits,
+            "node_scores": torch.sigmoid(node_logits),
             "node_embeddings": final_nodes,
         }

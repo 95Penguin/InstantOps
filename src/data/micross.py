@@ -39,8 +39,9 @@ class MicrossWindowDataset(Dataset[dict[str, torch.Tensor]]):
       * ``failure_target``: scalar; any service has an injection start next minute
       * ``node_targets``: [services]; per-service injection-start labels
 
-    The adjacency matrix is supplied by the caller because the current
-    preprocessing stage has not yet inferred a validated call graph.
+    The adjacency matrix is supplied by the caller. The repository includes a
+    trace-derived graph builder, but its full-dataset coverage still needs
+    validation before the graph should be treated as authoritative.
     """
 
     def __init__(
@@ -64,6 +65,10 @@ class MicrossWindowDataset(Dataset[dict[str, torch.Tensor]]):
         expected_shape = (len(self.services), len(self.services))
         if tuple(self.adjacency.shape) != expected_shape:
             raise ValueError(f"adjacency must have shape {expected_shape}")
+        if not torch.isfinite(self.adjacency).all():
+            raise ValueError("adjacency must contain only finite values")
+        if torch.any(self.adjacency < 0):
+            raise ValueError("adjacency weights must be nonnegative")
 
         features_by_time = self._read_features(Path(feature_csv))
         labels_by_time, target_times = self._read_labels(Path(label_csv))
@@ -138,10 +143,18 @@ class MicrossWindowDataset(Dataset[dict[str, torch.Tensor]]):
                     continue
                 timestamp = row["input_minute_utc"]
                 target_times[timestamp] = row["target_minute_utc"]
+                try:
+                    label = float(row["fault_next_minute"])
+                except (TypeError, ValueError) as exc:
+                    raise ValueError(
+                        f"invalid fault label: {row['fault_next_minute']!r}"
+                    ) from exc
+                if label not in (0.0, 1.0):
+                    raise ValueError(f"fault labels must be 0 or 1, got {label}")
                 target = labels.setdefault(
                     timestamp, np.zeros(len(self.services), dtype=np.float32)
                 )
-                target[service_index] = float(row["fault_next_minute"])
+                target[service_index] = label
         return labels, target_times
 
     @staticmethod
