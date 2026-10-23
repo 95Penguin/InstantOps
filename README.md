@@ -45,16 +45,16 @@ The label is a **GAIA injection-start proxy**, not the application-level SLA fai
 ## Project layout
 
 ```text
-data/raw/       Original downloaded datasets; do not edit in place
-data/processed/ Aligned windows and graph-ready features (generated; ignored by Git)
-docs/           Paper notes and reproduction decisions
-scripts/        Dataset and experiment entry points
-src/instantops/ Reusable Python implementation
+docs/           Paper notes and preprocessing decisions
+scripts/        Runnable data-preparation entry points
+src/instantops/ Reusable model and RCA implementation
 ```
+
+The input dataset stays outside this repository. Generated outputs go under `data/processed/` (ignored by Git) and the directory is created when preprocessing runs.
 
 ## Planned milestones
 
-1. Inspect the selected dataset and identify its modalities, timestamps, service identifiers, and fault labels. **Done for the GAIA MicroSS files listed above.**
+1. Inspect the selected dataset and identify its modalities, timestamps, service identifiers, and fault labels. **Done for GAIA MicroSS.**
 2. Convert available data into aligned fixed-size time windows. **Initial 1-minute service panel and next-minute injection labels implemented.**
 3. Build a service interaction graph from traces and attach per-service features.
 4. Implement and train a GNN-GRU failure prediction baseline.
