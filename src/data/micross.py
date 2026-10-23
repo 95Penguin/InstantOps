@@ -10,7 +10,7 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset
 
-from instantops.constants import SERVICES
+from constants import SERVICES
 
 FEATURE_COLUMNS = (
     "metric_cpu_mean",

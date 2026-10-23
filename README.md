@@ -48,7 +48,7 @@ The generated files are:
 - `data/processed/micross/service_features_1m.csv`: one row per service and UTC minute, with coarse metric-family means, metric-series coverage counts, and trace span/error/duration aggregates.
 - `data/processed/micross/next_minute_labels.csv`: one row per service and input minute; the label is positive when a GAIA fault injection starts in the following minute.
 
-`src/instantops/data/micross.py` loads these files into five-minute samples compatible with the model input shapes. It requires a service adjacency matrix from the caller; call-graph extraction is not implemented yet.
+`src/data/micross.py` loads these files into five-minute samples compatible with the model input shapes. It requires a service adjacency matrix from the caller; call-graph extraction is not implemented yet.
 
 The label is a **GAIA injection-start proxy**, not the application-level SLA failure label used by InstantOps. Trace 5xx counts here count spans and must not be interpreted as failed top-level requests. Feature values are grouped into coarse families because GAIA exposes many individually named metric series; this is an initial reproducible adapter, not the paper's undocumented per-metric normalization. See [the preprocessing decisions](docs/preprocessing.md).
 
@@ -57,7 +57,10 @@ The label is a **GAIA injection-start proxy**, not the application-level SLA fai
 ```text
 docs/           Paper notes and preprocessing decisions
 scripts/        Runnable data-preparation entry points
-src/instantops/ Reusable model and RCA implementation
+src/data/      Dataset adapters and window builders
+src/models/    GNN-GRU and other model implementations
+src/rca/       Root-cause ranking utilities
+src/constants.py Shared service and dataset constants
 ```
 
 The input dataset stays outside this repository. Generated outputs go under `data/processed/` (ignored by Git) and the directory is created when preprocessing runs.
