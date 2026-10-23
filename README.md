@@ -2,6 +2,14 @@
 
 This repository is a workflow-level reproduction of **InstantOps: A Joint Approach to System Failure Prediction and Root Cause Identification in Microservices Cloud-Native Applications** (ICPE 2024). It is an independent implementation; it does not claim to reproduce the paper's reported scores.
 
+## Install the Python package
+
+From the repository root, install the package and its NumPy/PyTorch dependencies:
+
+```bash
+python3 -m pip install -e .
+```
+
 ## Current milestone: GAIA / MicroSS preprocessing
 
 The MicroSS adapter aligns service metrics, trace spans, and run-log injection events into UTC time buckets. The script reads the metric ZIP and streams the original multipart trace archive, so it does not expand the multi-gigabyte trace tables to disk.
@@ -40,6 +48,8 @@ The generated files are:
 - `data/processed/micross/service_features_1m.csv`: one row per service and UTC minute, with coarse metric-family means, metric-series coverage counts, and trace span/error/duration aggregates.
 - `data/processed/micross/next_minute_labels.csv`: one row per service and input minute; the label is positive when a GAIA fault injection starts in the following minute.
 
+`src/instantops/data/micross.py` loads these files into five-minute samples compatible with the model input shapes. It requires a service adjacency matrix from the caller; call-graph extraction is not implemented yet.
+
 The label is a **GAIA injection-start proxy**, not the application-level SLA failure label used by InstantOps. Trace 5xx counts here count spans and must not be interpreted as failed top-level requests. Feature values are grouped into coarse families because GAIA exposes many individually named metric series; this is an initial reproducible adapter, not the paper's undocumented per-metric normalization. See [the preprocessing decisions](docs/preprocessing.md).
 
 ## Project layout
@@ -55,7 +65,7 @@ The input dataset stays outside this repository. Generated outputs go under `dat
 ## Planned milestones
 
 1. Inspect the selected dataset and identify its modalities, timestamps, service identifiers, and fault labels. **Done for GAIA MicroSS.**
-2. Convert available data into aligned fixed-size time windows. **Initial 1-minute service panel and next-minute injection labels implemented.**
+2. Convert available data into aligned fixed-size time windows. **1-minute service panel, next-minute injection labels, and a five-minute PyTorch Dataset implemented.**
 3. Build a service interaction graph from traces and attach per-service features.
 4. Implement and train a GNN-GRU failure prediction baseline.
 5. Rank candidate root-cause services and evaluate prediction/localization separately.
