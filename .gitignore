@@ -7,3 +7,4 @@ __pycache__/
 .DS_Store
 artifacts/
 *.egg-info/
+config/server.local.env

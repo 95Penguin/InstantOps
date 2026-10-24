@@ -1,20 +1,33 @@
-# GAIA MicroSS preprocessing decisions
+# MicroSS v2 preprocessing decisions
 
-## Inputs and streaming
+1. Coverage is July 2021; timestamps in output have explicit UTC offsets. Naive
+   source timestamps use --source-timezone (default UTC, an unverified assumption).
+   Metric epoch timestamps are never shifted. Verify source timezone on the real data.
+2. Retain nine selected container resource metrics separately (micross_schema.py).
+   CPU cores and ticks are excluded. In/out byte counters become delta/elapsed-second
+   rates; reset and invalid values are excluded and counted. Training fits each
+   feature's scaler only on training windows. Missing metrics are zero-filled with
+   explicit observed flags. Overlapping archive files contribute samples to a minute mean.
+3. Completed trace spans provide count, 5xx count/rate and average duration.
+   The end_time determines the input bucket so future duration information is not
+   pulled into an earlier start-time bucket. Counts refer to spans, not top-level requests.
+4. Business CSVs have date-only datetime fields; parse the timestamp and severity
+   embedded in message. Features are total/error/warning counts and a log_observed
+   indicator. log_observed means at least one parsed log, not verified collector uptime.
+   Missing log services/buckets are zero-filled and service coverage appears in quality_report.
+5. Run logs provide service/type/start/duration. Deduplicate exact events. Labels at
+   input minute t indicate injection starts in [t+60,t+120). They do not label every
+   active minute and do not establish an application SLA failure. Injection records
+   never extend the feature timeline or enter node features.
+6. The trace index resolves (trace_id,parent_id) to service. Each input minute's
+   graph counts child spans completed in that minute. Opposite directed counts
+   are summed symmetrically for the current GCN. Missing graph minutes have no
+   service edges (GCN adds self loops). Legacy static graph uses training-period
+   evidence only; temporal graph uses each input minute's own observed evidence.
+7. A fixed 70/15/15 chronological split defines distinct label targets. Validation
+   history may include earlier training observations, as in rolling forecasting;
+   standardization never fits validation/test data. This is not an incident-held-out
+   split. Reported RCA scores are per positive window.
 
-The adapter expects GAIA's `MicroSS/metric/metric_full.zip`, the original multipart `MicroSS/trace/trace_split.zip` with its `.z01` through `.z31` volumes, and July run tables under `MicroSS/run/`. It uses Python's ZIP reader for the metric archive and `7zz x -so` to stream each July trace table. It deliberately avoids the merged `trace_full.zip`, which failed during extraction in the observed local workflow.
-
-## Time alignment
-
-- All output timestamps are UTC and bucketed by Unix epoch; the default bucket is 60 seconds.
-- Metric samples use epoch milliseconds and are bucketed after conversion to seconds. For each individual metric series, values in a bucket are averaged first. The script then averages those series-level means within a service and metric family, so a series with more samples does not get extra weight.
-- Trace spans are assigned using `start_time`, falling back to `timestamp`. Per service and bucket, the script records span count, 5xx span count/rate, and mean span duration in milliseconds.
-- Labels for an input minute at time `t` refer to fault-injection starts in `[t + 60s, t + 120s)`. This provides the next-minute target convention; it does not label every minute while a long injection remains active.
-
-## Labels and limitations
-
-Run-log messages provide the injected fault type, service, start time, and duration. Duplicate log entries are deduplicated by service, type, start, and duration. The generated positive label means an injection begins on that service in the target minute. This is an available root-cause proxy, not proof that the application crossed an SLA threshold. Do not present its scores as directly comparable to the paper's failure prediction results.
-
-The paper describes aligned windows, trace-derived service dependencies, a GNN, and a GRU, but does not specify enough detail to infer every parser, metric normalization, or missing-value rule. This adapter therefore records explicit choices: coarse metric families (`cpu`, `memory`, `network`, `disk`, `other`), zero-filled absent service-minute values, UTC 1-minute buckets, and run-log injection-start targets. Zero-filled feature values currently mean “no metric observation in this bucket” and are not statistically imputed.
-
-The adapter currently covers July 2021, when metric, trace, and run-log data overlap. A five-minute PyTorch Dataset is implemented in `src/data/micross.py`; it builds contiguous service sequences and accepts a caller-supplied adjacency matrix. The Trace parent/child graph extractor is implemented in `scripts/build_micross_graph.py`. It derives the same chronological training interval as the trainer and counts edges only from that interval; full-data graph coverage and edge direction still need validation. Paper-style SLA labels remain future work. The training script provides a chronological train/validation/test split and evaluation for the available injection-start proxy labels; baseline comparisons are deferred. See the repository README for limitations and usage.
+Schema v2, resource quality, log/trace coverage and graph coverage are serialized.
+Real-data schemas and graph resolution must be validated during the server run.

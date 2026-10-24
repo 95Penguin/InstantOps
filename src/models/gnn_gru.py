@@ -42,9 +42,17 @@ class InstantOpsGNNGRU(nn.Module):
         temporal_hidden: int = 64,
         num_classes: int = 2,
         dropout: float = 0.1,
+        gcn_layers: int = 2,
     ) -> None:
         super().__init__()
-        self.graph_conv = GraphConvolution(feature_dim, graph_hidden)
+        if gcn_layers < 1:
+            raise ValueError("gcn_layers must be positive")
+        self.graph_convs = nn.ModuleList(
+            [
+                GraphConvolution(feature_dim if index == 0 else graph_hidden, graph_hidden)
+                for index in range(gcn_layers)
+            ]
+        )
         self.graph_norm = nn.LayerNorm(graph_hidden)
         self.dropout = nn.Dropout(dropout)
         self.temporal = nn.GRU(graph_hidden, temporal_hidden, batch_first=True)
@@ -62,17 +70,14 @@ class InstantOpsGNNGRU(nn.Module):
             node_features.shape[:3] != adjacency.shape[:3]
             or adjacency.shape[-1] != node_features.shape[2]
         ):
-            raise ValueError(
-                "node_features and adjacency batch/time/node dimensions must match"
-            )
+            raise ValueError("node_features and adjacency batch/time/node dimensions must match")
 
         batch, steps, services, _ = node_features.shape
-        spatial = self.graph_conv(
-            node_features.reshape(batch * steps, services, -1),
-            adjacency.reshape(batch * steps, services, services),
-        )
-        spatial = torch.relu(self.graph_norm(spatial))
-        spatial = self.dropout(spatial).reshape(batch, steps, services, -1)
+        spatial = node_features.reshape(batch * steps, services, -1)
+        graphs = adjacency.reshape(batch * steps, services, services)
+        for convolution in self.graph_convs:
+            spatial = self.dropout(torch.relu(self.graph_norm(convolution(spatial, graphs))))
+        spatial = spatial.reshape(batch, steps, services, -1)
 
         # Encode each service's sequence independently after spatial message passing.
         per_service = spatial.permute(0, 2, 1, 3).reshape(batch * services, steps, -1)
