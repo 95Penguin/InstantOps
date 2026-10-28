@@ -66,6 +66,8 @@ class GraphWindowDataset(Dataset[dict[str, torch.Tensor]]):
             raise ValueError("feature CSV contains no service-minute rows")
 
         self.features = np.stack([features_by_time[t] for t in self.timestamps])
+        self.valid_minutes = np.array([self._valid_by_time[t] for t in self.timestamps])
+        time_indices = {timestamp: index for index, timestamp in enumerate(self.timestamps)}
         self.node_targets = np.stack(
             [
                 labels_by_time.get(t, np.zeros(len(self.services), dtype=np.float32))
@@ -78,13 +80,19 @@ class GraphWindowDataset(Dataset[dict[str, torch.Tensor]]):
             if self._is_contiguous(end)
             and self.timestamps[end] in labels_by_time
             and target_times[self.timestamps[end]] in available_timestamps
+            and self.valid_minutes[end - history + 1 : end + 1].all()
+            and self.valid_minutes[time_indices[target_times[self.timestamps[end]]]]
         ]
+        self.invalid_minutes = int((~self.valid_minutes).sum())
         if not self.sample_indices:
-            raise ValueError(f"no contiguous {history}-minute sequences found in the feature CSV")
+            raise ValueError(
+                f"no valid contiguous {history}-minute sequences with observed input/target coverage"
+            )
 
     def _read_features(self, path: Path) -> dict[str, np.ndarray]:
         service_indices = {name: index for index, name in enumerate(self.services)}
         values: dict[str, np.ndarray] = {}
+        self._valid_by_time: dict[str, bool] = {}
         seen: dict[str, set[int]] = {}
         with path.open("r", encoding="utf-8-sig", newline="") as handle:
             reader = csv.DictReader(handle)
@@ -92,11 +100,27 @@ class GraphWindowDataset(Dataset[dict[str, torch.Tensor]]):
             if not reader.fieldnames or not required.issubset(reader.fieldnames):
                 missing = sorted(required - set(reader.fieldnames or ()))
                 raise ValueError(f"feature CSV is missing columns: {missing}")
+            observed_columns = [
+                column for column in self.feature_columns if column.startswith("observed_")
+            ]
             for row in reader:
                 service_index = service_indices.get(row["service"])
                 if service_index is None:
                     continue
                 timestamp = row["timestamp_utc"]
+                if "telemetry_valid" in row:
+                    valid = self._to_float(row["telemetry_valid"], "telemetry_valid")
+                    if valid not in (0.0, 1.0):
+                        raise ValueError("telemetry_valid must be 0 or 1")
+                    valid = bool(valid)
+                elif observed_columns:
+                    # Older MicroSS v2 panels already contain resource observed flags.
+                    valid = any(
+                        self._to_float(row[column], column) > 0 for column in observed_columns
+                    )
+                else:
+                    valid = True
+                self._valid_by_time[timestamp] = self._valid_by_time.get(timestamp, True) and valid
                 indices = seen.setdefault(timestamp, set())
                 if service_index in indices:
                     raise ValueError(f"duplicate feature row for {timestamp}/{row['service']}")

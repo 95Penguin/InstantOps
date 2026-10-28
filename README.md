@@ -17,11 +17,16 @@ Run project commands through `uv run` so they use the locked environment.
 The recommended entry point is:
 
 ```bash
-uv run python scripts/run_micross.py /path/to/GAIA-DataSet/MicroSS \
-  --work-dir /path/to/temporary/index --epochs 20 --device auto
+uv run python scripts/run_micross.py --epochs 20 --device auto
 ```
 
 See [server instructions](docs/server.md) for the recorded server and input layout.
+Raw data defaults to `<project>/data/MicroSS/`, processed data to
+`data/processed/micross_v2/`, and temporary indexes to `data/tmp/micross/`.
+These paths are ignored by Git. Defaults are resolved from the code location,
+so the same layout works after copying the project to the server.
+An optional positional path still supports data stored elsewhere, for example
+`uv run python scripts/run_micross.py /other/disk/MicroSS --work-dir /large/disk/tmp`.
 The pipeline streams metrics, original multipart trace and business ZIPs, builds
 minute graphs, trains the two-layer GCN-GRU, and exports prediction/attribution results.
 It requires the July run CSVs, metric/metric_full.zip, trace/trace_split.zip and
@@ -32,6 +37,14 @@ business/business_split.zip with all their respective volumes.
 - Training: `scripts/train_micross.py --data-dir ... --graph .../service_adjacency_1m.npz`.
 - `--rca-method masking` (default) ranks score drops after masking each service. `node-head` ranks the auxiliary supervised head.
 - `--skip-prepare --skip-graph` on the pipeline reuses completed v2 stages for another training run.
+
+Standalone commands use the same v2 output defaults:
+
+```bash
+uv run python scripts/prepare_micross.py
+uv run python scripts/build_micross_graph.py --training-data-dir data/processed/micross_v2
+uv run python scripts/train_micross.py --graph data/processed/micross_v2/service_adjacency_1m.npz
+```
 
 Each resource metric retains its own unit/channel. Network byte counters become
 rates using earlier observations. Metric observation flags and business log
@@ -63,12 +76,21 @@ src/rca/                 Deterministic masking and ranking
 tests/                   Unit and synthetic end-to-end regression checks
 ```
 
-MicroSS and RCAEval will share models and numerical training utilities while keeping
-parsers, feature schemas, label definitions and split strategies dataset-specific.
-RCAEval has not been integrated; it follows after a full MicroSS server run.
-See [remaining work](docs/architecture.md) and [preprocessing decisions](docs/preprocessing.md).
+The current repository focuses on the MicroSS workflow. See
+[remaining work](docs/architecture.md) and [preprocessing decisions](docs/preprocessing.md).
 For the next application-failure experiment, see the proposed
 [labeling and evaluation protocol](docs/experiment-protocol.md); it is not yet implemented.
 
 Old family-average data remain loadable by the standalone trainer, but should not
 be used for v2 experiments. One-layer model checkpoints require retraining.
+
+Before a server run, check uploaded inputs without scanning the telemetry:
+
+```bash
+uv run python scripts/run_micross.py --check-inputs-only
+```
+
+See [preprocessing decisions](docs/preprocessing.md) for resource coverage
+filtering, archive-check limits and the probability-based RCA score. Regenerate
+preprocessing outputs to persist explicit validity metadata and quality counts;
+old v2 panels are also filtered using their existing resource observed flags.

@@ -13,15 +13,16 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 from constants import SERVICES
 from data.micross import MicrossWindowDataset
+from data.paths import MICROSS_OUTPUT_DIR, MICROSS_PROCESSED_DIR
 from training.experiment import run_training
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--data-dir", type=Path, default=ROOT / "data/processed/micross")
+    parser.add_argument("--data-dir", type=Path, default=MICROSS_PROCESSED_DIR)
     parser.add_argument("--adjacency-npy", "--graph", dest="adjacency_npy", type=Path)
     parser.add_argument("--rca-method", choices=("masking", "node-head"), default="masking")
-    parser.add_argument("--output-dir", type=Path, default=ROOT / "artifacts/micross")
+    parser.add_argument("--output-dir", type=Path, default=MICROSS_OUTPUT_DIR)
     parser.add_argument("--history", type=int, default=5)
     parser.add_argument("--epochs", type=int, default=20)
     parser.add_argument("--batch-size", type=int, default=128)

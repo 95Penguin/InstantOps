@@ -35,7 +35,7 @@ def masking_importance(
     """Estimate service importance by masking one service at a time.
 
     Returns a [batch, services] nonnegative score measuring the drop in the
-    target-class logit when that service's temporal features are zeroed.
+    target-class probability when that service's temporal features are zeroed.
     This is an interpretable starter implementation; compare it with the
     paper's exact permutation procedure once inputs and labels are prepared.
     """
@@ -52,11 +52,11 @@ def masking_importance(
 @torch.no_grad()
 def _masking_scores(model, node_features, adjacency, target_class):
     with torch.no_grad():
-        baseline = model(node_features, adjacency)["failure_logits"][:, target_class]
+        baseline = model(node_features, adjacency)["failure_logits"].softmax(dim=-1)[:, target_class]
         scores = []
         for service_idx in range(node_features.size(2)):
             masked = node_features.clone()
             masked[:, :, service_idx, :] = 0
-            perturbed = model(masked, adjacency)["failure_logits"][:, target_class]
+            perturbed = model(masked, adjacency)["failure_logits"].softmax(dim=-1)[:, target_class]
             scores.append((baseline - perturbed).clamp_min(0))
         return torch.stack(scores, dim=1)

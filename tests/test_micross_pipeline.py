@@ -163,6 +163,12 @@ class MicrossPipelineTests(unittest.TestCase):
                 "--batch-size",
                 "16",
             ]
+            preflight = subprocess.run(
+                [*command, "--check-inputs-only"], capture_output=True, text=True, cwd=ROOT
+            )
+            self.assertEqual(preflight.returncode, 0, preflight.stdout + preflight.stderr)
+            self.assertFalse(data.exists(), "preflight must not run preprocessing")
+            self.assertFalse(output.exists(), "preflight must not start training")
             result = subprocess.run(command, capture_output=True, text=True, cwd=ROOT)
             self.assertEqual(result.returncode, 0, result.stdout + "\n" + result.stderr)
             schema = json.loads((data / "feature_schema.json").read_text())

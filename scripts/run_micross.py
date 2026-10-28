@@ -9,25 +9,46 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "src"))
+
+from data.paths import (
+    MICROSS_OUTPUT_DIR,
+    MICROSS_PROCESSED_DIR,
+    MICROSS_RAW_DIR,
+    MICROSS_WORK_DIR,
+    resolve_micross_root,
+)
 
 
-def main() -> int:
+def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("micross_root", type=Path)
-    parser.add_argument("--data-dir", type=Path, default=ROOT / "data/processed/micross_v2")
-    parser.add_argument("--output-dir", type=Path, default=ROOT / "artifacts/micross_v2")
-    parser.add_argument("--work-dir", type=Path, required=True)
+    parser.add_argument(
+        "micross_root",
+        type=Path,
+        nargs="?",
+        default=MICROSS_RAW_DIR,
+        help="MicroSS directory (default: <project>/data/MicroSS)",
+    )
+    parser.add_argument("--data-dir", type=Path, default=MICROSS_PROCESSED_DIR)
+    parser.add_argument("--output-dir", type=Path, default=MICROSS_OUTPUT_DIR)
+    parser.add_argument("--work-dir", type=Path, default=MICROSS_WORK_DIR)
     parser.add_argument("--epochs", type=int, default=20)
     parser.add_argument("--history", type=int, default=5)
     parser.add_argument("--batch-size", type=int, default=128)
     parser.add_argument("--device", choices=("auto", "cpu", "cuda", "mps"), default="auto")
+    parser.add_argument("--check-inputs-only", action="store_true")
     parser.add_argument("--skip-prepare", action="store_true")
     parser.add_argument("--skip-graph", action="store_true")
     parser.add_argument("--source-timezone", default="UTC")
     args = parser.parse_args()
     if min(args.epochs, args.history, args.batch_size) < 1:
         parser.error("epochs, history and batch-size must be positive")
-    root = args.micross_root.expanduser().resolve()
+    return args
+
+
+def main() -> int:
+    args = parse_args()
+    root = resolve_micross_root(args.micross_root)
     data = args.data_dir.expanduser().resolve()
 
     def run(script, *arguments):
@@ -35,6 +56,10 @@ def main() -> int:
         print("Running:", " ".join(command), flush=True)
         subprocess.run(command, check=True, cwd=ROOT)
 
+    if args.check_inputs_only:
+        run("prepare_micross.py", root, "--check-inputs-only",
+            "--source-timezone", args.source_timezone)
+        return 0
     if not args.skip_prepare:
         run("prepare_micross.py", root, "--output", data, "--source-timezone", args.source_timezone)
     import json

@@ -31,3 +31,37 @@
 
 Schema v2, resource quality, log/trace coverage and graph coverage are serialized.
 Real-data schemas and graph resolution must be validated during the server run.
+
+## Coverage filtering and startup checks
+
+A service-minute is `telemetry_valid=1` only if at least one selected resource
+metric is observed. A usable window requires every service to meet this rule in
+all history minutes and in the next target minute. Zero values with an observed
+flag remain valid; missing trace spans or logs alone do not establish collector
+failure or service health. This conservative rule can exclude real incidents
+with lost resource monitoring; invalid minutes are reported rather than labeled
+normal. Existing v2 panels without this column use their metric observed flags.
+Legacy panels without coverage indicators cannot receive this coverage check.
+`telemetry_valid` is metadata, never a model feature.
+
+Before telemetry scans, preprocessing checks 7-Zip availability, the combined
+metric ZIP directory, original trace/business volume presence, July members,
+and parsed July injection records. This is not a full CRC/integrity scan:
+truncated nonempty files may still fail during streaming.
+
+```bash
+uv run python scripts/run_micross.py --check-inputs-only
+```
+
+Masking RCA uses the nonnegative decrease in failure probability. Equal scores
+are ordered by service order, with all-service ties counted in metrics.json.
+Validation/test loss accumulates weighted cross-entropy numerators and weight
+sums across the entire epoch; node BCE uses its element count. Thus evaluation
+loss does not depend on how positive samples happen to be grouped into batches.
+
+Empty/whitespace-only business messages are counted and skipped, not treated as
+errors or normal requests. Business parsing runs before the expensive trace scan.
+Other malformed messages still fail with the member/line and a short preview.
+When parsing raises, the extractor is terminated without hiding that original
+exception behind a secondary nonzero 7-Zip exit. Canonical local timestamps use
+an equivalent ISO parser; legacy accepted formats retain their strptime fallback.

@@ -33,6 +33,9 @@ def run_training(
     Adapters must provide binary failure/node labels with documented semantics.
     Different datasets train separate weights and never share fitted scalers.
     """
+    if getattr(dataset, "failure_labels_available", True) is False:
+        raise ValueError("application failure labels are unavailable for this dataset")
+
     # Scaling replaces the feature array on a shallow copy, so repeated runs
     # on the same adapter still fit against the original raw feature values.
     dataset = copy.copy(dataset)
@@ -156,6 +159,20 @@ def run_training(
     )
     metrics = {
         "rca_method": method,
+        "rca_score_definition": (
+            "nonnegative target-probability drop" if method == "masking" else "node sigmoid"
+        ),
+        "coverage": {
+            "invalid_panel_minutes": dataset.invalid_minutes,
+            "usable_windows": len(dataset),
+        },
+        "rca_ties": {
+            "all_services_equal_windows": int((
+                test_output["node_scores"].max(axis=1)
+                == test_output["node_scores"].min(axis=1)
+            ).sum()),
+            "tie_break": "service order; Hit/MRR may depend on this order",
+        },
         "run_config": {
             key: str(value) if isinstance(value, Path) else value
             for key, value in vars(args).items()

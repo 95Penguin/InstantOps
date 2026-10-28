@@ -28,6 +28,8 @@ from zoneinfo import ZoneInfo
 
 from constants import SERVICES
 from data.micross_schema import COUNTERS, FEATURES, LOG_FEATURES, METRICS
+from data.paths import MICROSS_PROCESSED_DIR, MICROSS_RAW_DIR, resolve_micross_root
+from data.preflight import check_micross_inputs
 
 SERVICE_PATTERN = re.compile(r"^(" + "|".join(SERVICES) + r")_(.+)$")
 DATE_RANGE_PATTERN = re.compile(r"_(20\d{2}-\d{2}-\d{2})_(20\d{2}-\d{2}-\d{2})\.csv$")
@@ -52,13 +54,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "gaia_root",
         type=Path,
-        help="GAIA checkout, MicroSS directory, or directory containing MicroSS/",
+        nargs="?",
+        default=MICROSS_RAW_DIR,
+        help="MicroSS directory or parent (default: <project>/data/MicroSS)",
     )
     parser.add_argument(
         "--output",
         type=Path,
-        default=Path("data/processed/micross"),
-        help="Output directory (default: data/processed/micross)",
+        default=MICROSS_PROCESSED_DIR,
+        help="Output directory (default: <project>/data/processed/micross_v2)",
     )
     parser.add_argument(
         "--window-seconds",
@@ -89,6 +93,10 @@ def parse_args() -> argparse.Namespace:
         default="UTC",
         help="Timezone of naive trace/business/run timestamps; metrics epoch is unchanged",
     )
+    parser.add_argument(
+        "--check-inputs-only", action="store_true",
+        help="Check dependencies and archive directories without scanning telemetry",
+    )
     args = parser.parse_args()
     ZoneInfo(args.source_timezone)
     if args.window_seconds != 60:
@@ -97,12 +105,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def locate_micross(root: Path) -> Path:
-    root = root.expanduser().resolve()
-    candidates = (root, root / "MicroSS", root / "GAIA-DataSet" / "MicroSS")
-    for candidate in candidates:
-        if (candidate / "run").is_dir() and (candidate / "metric").is_dir():
-            return candidate
-    raise FileNotFoundError(f"Could not find MicroSS run/ and metric/ directories under {root}")
+    return resolve_micross_root(root)
 
 
 def resolve_input(path: Path | None, default: Path) -> Path:
@@ -237,17 +240,10 @@ def trace_members(archive_path: Path, seven_zip: str) -> list[str]:
 
 
 def parse_trace_timestamp(value: str, source_timezone: str = "UTC") -> int | None:
-    value = value.strip()
-    for pattern in ("%Y-%m-%d %H:%M:%S.%f", "%Y-%m-%d %H:%M:%S"):
-        try:
-            return int(
-                datetime.strptime(value, pattern)
-                .replace(tzinfo=ZoneInfo(source_timezone))
-                .timestamp()
-            )
-        except ValueError:
-            continue
-    return None
+    parsed = parse_datetime(value)
+    if parsed is None:
+        return None
+    return int(parsed.replace(tzinfo=ZoneInfo(source_timezone)).timestamp())
 
 
 def aggregate_traces(
@@ -297,9 +293,12 @@ def aggregate_traces(
                     pass
                 member_counts[service] += 1
         finally:
+            failed = sys.exc_info()[0] is not None
+            if failed and process.poll() is None:
+                process.terminate()
             stream.close()
             return_code = process.wait()
-            if return_code:
+            if return_code and not failed:
                 raise RuntimeError(f"7-Zip failed while streaming {member}")
         print(f"Read trace table: {member}", file=sys.stderr)
 
@@ -314,8 +313,20 @@ def aggregate_traces(
     return result, member_counts
 
 
+LOCAL_ISO_TIME = re.compile(
+    r"[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}(?:[.][0-9]{1,6})?"
+)
+
+
 def parse_datetime(value: str) -> datetime | None:
     value = value.strip()
+    # The canonical source format has a much faster ISO parser. Keep the
+    # legacy strptime fallback for previously accepted non-padded values.
+    if LOCAL_ISO_TIME.fullmatch(value):
+        try:
+            return datetime.fromisoformat(value)
+        except ValueError:
+            return None
     for pattern in ("%Y-%m-%d %H:%M:%S.%f", "%Y-%m-%d %H:%M:%S"):
         try:
             return datetime.strptime(value, pattern)
@@ -383,7 +394,7 @@ def write_outputs(
     feature_path = output_dir / "service_features_1m.csv"
     label_path = output_dir / "next_minute_labels.csv"
 
-    feature_fields = ["timestamp_utc", "service", *FEATURES]
+    feature_fields = ["timestamp_utc", "service", "telemetry_valid", *FEATURES]
     label_fields = [
         "input_minute_utc",
         "target_minute_utc",
@@ -417,6 +428,9 @@ def write_outputs(
                     value = metrics.get((service, bucket, metric_name))
                     row[f"metric_{metric_name}"] = value[0] if value else 0.0
                     row[f"observed_{metric_name}"] = int(value is not None)
+                row["telemetry_valid"] = int(
+                    any(row[f"observed_{name}"] for name in METRICS)
+                )
                 row.update({name: 0 for name in LOG_FEATURES})
                 row.update((logs or {}).get((service, bucket), {}))
                 row.update(traces.get((service, bucket), {}))
@@ -439,7 +453,10 @@ def write_outputs(
     return feature_rows, label_rows
 
 
-def aggregate_business(archive: Path, bucket_seconds: int, source_timezone: str = "UTC"):
+def aggregate_business(
+    archive: Path, bucket_seconds: int, source_timezone: str = "UTC",
+    quality: Counter | None = None,
+):
     """Read actual business logs, excluding injected run-log labels from inputs."""
     seven_zip = shutil.which("7zz") or shutil.which("7z")
     if seven_zip is None:
@@ -458,6 +475,7 @@ def aggregate_business(archive: Path, bucket_seconds: int, source_timezone: str 
         lambda: {"log_count": 0, "log_error_count": 0, "log_warning_count": 0, "log_observed": 1}
     )
     counts = Counter()
+    quality = quality if quality is not None else Counter()
     for member in members:
         process, stream = open_trace_member(seven_zip, archive, member)
         try:
@@ -465,16 +483,24 @@ def aggregate_business(archive: Path, bucket_seconds: int, source_timezone: str 
             if not reader.fieldnames or not {"service", "message"}.issubset(reader.fieldnames):
                 raise ValueError(f"business columns missing: {member}")
             for row in reader:
+                quality["total_rows"] += 1
                 service = (row.get("service") or "").strip()
                 message = row.get("message") or ""
                 if service not in SERVICES:
+                    quality["unknown_service_rows"] += 1
+                    continue
+                if not message.strip():
+                    quality["empty_message_rows"] += 1
                     continue
                 # Timestamp and severity are inside message; datetime is date only.
                 match = re.match(
                     r"(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:[,.]\d+)?)\s*\|\s*(\w+)\s*\|", message
                 )
                 if not match:
-                    raise ValueError(f"cannot parse business timestamp/severity in {member}")
+                    raise ValueError(
+                        f"cannot parse business timestamp/severity in {member}, "
+                        f"CSV line {reader.line_num}: {message[:160]!r}"
+                    )
                 timestamp = parse_trace_timestamp(match.group(1).replace(",", "."), source_timezone)
                 if timestamp is None:
                     raise ValueError("invalid business timestamp")
@@ -485,10 +511,14 @@ def aggregate_business(archive: Path, bucket_seconds: int, source_timezone: str 
                 )
                 aggregate["log_warning_count"] += int(match.group(2).upper() in {"WARN", "WARNING"})
                 counts[service] += 1
+                quality["parsed_rows"] += 1
         finally:
+            failed = sys.exc_info()[0] is not None
+            if failed and process.poll() is None:
+                process.terminate()
             stream.close()
             code = process.wait()
-            if code:
+            if code and not failed:
                 raise RuntimeError(f"7-Zip failed reading business logs: {member}")
         print(f"Read business table: {member}", file=sys.stderr)
     return dict(totals), counts
@@ -507,7 +537,21 @@ def main() -> int:
         if not run_dir.is_dir():
             raise FileNotFoundError(run_dir)
 
+        input_report = check_micross_inputs(metric_archive, trace_archive, business_archive, run_dir)
+        injections = load_injections(run_dir, args.source_timezone)
+        if not injections:
+            raise ValueError("no injection labels parsed from July run logs")
+        if args.check_inputs_only:
+            print(json.dumps(input_report, indent=2))
+            return 0
+
         print(f"MicroSS root: {root}", file=sys.stderr)
+        # Validate business parsing before spending time scanning the full trace archive.
+        log_quality = Counter()
+        logs, log_counts = aggregate_business(
+            business_archive, args.window_seconds, args.source_timezone, log_quality
+        )
+        print(f"Business log quality: {dict(log_quality)}", file=sys.stderr)
         print(f"Reading metrics from {metric_archive}", file=sys.stderr)
         metric_quality = []
         metrics, metric_files = aggregate_metrics(
@@ -519,12 +563,6 @@ def main() -> int:
             trace_archive, args.window_seconds, args.source_timezone
         )
         print(f"Trace spans by service: {dict(trace_counts)}", file=sys.stderr)
-        logs, log_counts = aggregate_business(
-            business_archive, args.window_seconds, args.source_timezone
-        )
-        injections = load_injections(run_dir, args.source_timezone)
-        if not injections:
-            raise ValueError("no injection labels parsed from July run logs")
         print(f"Unique injection events: {len(injections)}", file=sys.stderr)
         feature_rows, label_rows = write_outputs(
             args.output.expanduser().resolve(),
@@ -543,14 +581,21 @@ def main() -> int:
                     "feature_columns": list(FEATURES),
                     "services": list(SERVICES),
                     "counter_rates": sorted(COUNTERS),
+                    "window_validity": "each service has >=1 selected resource metric in every input and target minute",
                 },
                 indent=2,
             )
         )
         report = {
+            "input_preflight": input_report,
+            "window_validity": "each service has >=1 selected resource metric in every input and target minute",
+            "invalid_service_minutes": feature_rows - len({
+                (service, bucket) for service, bucket, _ in metrics
+            }),
             "metric_series": metric_quality,
             "trace_spans_by_service": dict(trace_counts),
             "business_logs_by_service": dict(log_counts),
+            "business_log_quality": dict(log_quality),
             "injections": len(injections),
             "service_minute_rows": feature_rows,
             "missing_policy": "zero fill plus metric observed flags and log_observed",

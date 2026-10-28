@@ -64,10 +64,12 @@ def run_epoch(
     node_loss_weight: float,
     optimizer: torch.optim.Optimizer | None = None,
 ) -> tuple[float, dict[str, np.ndarray]]:
+    if failure_loss_fn.reduction != "mean" or node_loss_fn.reduction != "mean":
+        raise ValueError("epoch aggregation requires mean-reduced losses")
     training = optimizer is not None
     model.train(training)
-    total_loss = 0.0
-    total_items = 0
+    failure_numerator = failure_denominator = 0.0
+    node_numerator = node_denominator = 0.0
     collected: dict[str, list[np.ndarray]] = {
         "labels": [],
         "probabilities": [],
@@ -84,18 +86,29 @@ def run_epoch(
             failure_loss = failure_loss_fn(output["failure_logits"], labels)
             node_loss = node_loss_fn(output["node_logits"], node_targets)
             loss = failure_loss + node_loss_weight * node_loss
+            if not torch.isfinite(loss):
+                raise ValueError("non-finite loss; check features and class weights")
             if training:
                 optimizer.zero_grad(set_to_none=True)
                 loss.backward()
                 nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
                 optimizer.step()
         size = labels.size(0)
-        total_loss += loss.item() * size
-        total_items += size
+        # CrossEntropyLoss(mean) divides by target-class weight, not batch size.
+        weight = getattr(failure_loss_fn, "weight", None)
+        denominator = float(weight[labels].sum().item()) if weight is not None else size
+        failure_numerator += failure_loss.item() * denominator
+        failure_denominator += denominator
+        node_numerator += node_loss.item() * node_targets.numel()
+        node_denominator += node_targets.numel()
         probabilities = output["failure_logits"].softmax(dim=-1)[:, 1]
         collected["labels"].append(labels.detach().cpu().numpy())
         collected["probabilities"].append(probabilities.detach().cpu().numpy())
         collected["node_targets"].append(node_targets.detach().cpu().numpy())
         collected["node_scores"].append(output["node_scores"].detach().cpu().numpy())
     arrays = {key: np.concatenate(value, axis=0) for key, value in collected.items()}
-    return total_loss / max(total_items, 1), arrays
+    epoch_loss = (
+        failure_numerator / max(failure_denominator, 1e-12)
+        + node_loss_weight * node_numerator / max(node_denominator, 1)
+    )
+    return epoch_loss, arrays

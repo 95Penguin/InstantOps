@@ -1,5 +1,7 @@
 data/raw/**
 data/processed/**
+/data/MicroSS/
+/data/tmp/
 __pycache__/
 *.py[cod]
 .venv/
@@ -8,3 +10,8 @@ __pycache__/
 artifacts/
 *.egg-info/
 config/server.local.env
+.ruff_cache/
+
+/data/RCAEval/
+
+/.tools/

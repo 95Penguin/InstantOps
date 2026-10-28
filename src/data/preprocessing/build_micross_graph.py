@@ -20,11 +20,11 @@ from zoneinfo import ZoneInfo
 
 import numpy as np
 
-ROOT = Path(__file__).resolve().parents[3]
-
-from constants import SERVICES  # noqa: E402
-from data.micross import MicrossWindowDataset  # noqa: E402
-from data.splits import chronological_split  # noqa: E402
+from constants import SERVICES
+from data.micross import MicrossWindowDataset
+from data.paths import MICROSS_PROCESSED_DIR, MICROSS_RAW_DIR, MICROSS_WORK_DIR
+from data.splits import chronological_split
+from data.preflight import check_split_archive
 
 TRACE_MEMBER_PREFIX = "trace/trace_table_"
 TRACE_MONTH_SUFFIX = "_2021-07.csv"
@@ -33,11 +33,18 @@ BATCH_SIZE = 20_000
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("trace_archive", type=Path, help="Original trace_split.zip")
-    parser.add_argument("--output-dir", type=Path, default=ROOT / "data/processed/micross")
+    parser.add_argument(
+        "trace_archive",
+        type=Path,
+        nargs="?",
+        default=MICROSS_RAW_DIR / "trace" / "trace_split.zip",
+        help="Original trace_split.zip (default: <project>/data/MicroSS/trace/trace_split.zip)",
+    )
+    parser.add_argument("--output-dir", type=Path, default=MICROSS_PROCESSED_DIR)
     parser.add_argument(
         "--work-dir",
         type=Path,
+        default=MICROSS_WORK_DIR,
         help="Directory for the temporary SQLite index (needs free space for the index)",
     )
     parser.add_argument(
@@ -348,6 +355,11 @@ def main() -> int:
     seven_zip = shutil.which("7zz") or shutil.which("7z")
     if seven_zip is None:
         print("error: install 7-Zip first (macOS: brew install sevenzip)", file=sys.stderr)
+        return 2
+    try:
+        check_split_archive(args.trace_archive.expanduser().resolve(), seven_zip, "trace")
+    except (OSError, ValueError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
         return 2
     if args.training_data_dir:
         args.training_data_dir = args.training_data_dir.expanduser().resolve()
