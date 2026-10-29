@@ -7,7 +7,7 @@ import torch
 from torch import nn
 from torch.utils.data import DataLoader
 
-from data.windows import GraphWindowDataset
+from data.dataset import GraphWindowDataset
 from models.gnn_gru import InstantOpsGNNGRU
 
 

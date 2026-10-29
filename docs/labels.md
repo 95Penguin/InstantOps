@@ -22,7 +22,7 @@ it must not be described as localization at the first alarm. Historical v1
 artifacts used minute-overlap attribution; the current label generator uses v2.
 
 ```bash
-.venv/bin/python scripts/train_micross.py --data-dir data/processed/micross_mps_smoke_01 --graph data/processed/micross_mps_smoke_01/service_adjacency_1m.npz --labels data/processed/micross_mps_smoke_01/entry_failure_v2.csv --output-dir artifacts/entry_failure_mps_v2 --epochs 5 --device mps
+.venv/bin/python scripts/run_micross.py train --data-dir data/processed/micross_mps_smoke_01 --graph data/processed/micross_mps_smoke_01/service_adjacency_1m.npz --labels data/processed/micross_mps_smoke_01/entry_failure_v2.csv --output-dir artifacts/entry_failure_mps_v2 --epochs 5 --device mps
 ```
 
 ## Entry failure v1 (local experiment)
@@ -35,8 +35,8 @@ the second minute to complete. Training still forecasts **next-minute state**,
 including ongoing events; it is not an onset-only early-warning experiment.
 
 ```bash
-.venv/bin/python scripts/label_micross.py --data-dir data/processed/micross_mps_smoke_01 --output data/processed/micross_mps_smoke_01/entry_failure_v1.csv --error-rate-threshold 0.5 --min-entry-spans 20 --consecutive-minutes 2 --max-injection-seconds 3600
-.venv/bin/python scripts/train_micross.py --data-dir data/processed/micross_mps_smoke_01 --graph data/processed/micross_mps_smoke_01/service_adjacency_1m.npz --labels data/processed/micross_mps_smoke_01/entry_failure_v1.csv --output-dir artifacts/entry_failure_mps_v1 --epochs 5 --device mps
+.venv/bin/python scripts/run_micross.py label --data-dir data/processed/micross_mps_smoke_01 --output data/processed/micross_mps_smoke_01/entry_failure_v1.csv --error-rate-threshold 0.5 --min-entry-spans 20 --consecutive-minutes 2 --max-injection-seconds 3600
+.venv/bin/python scripts/run_micross.py train --data-dir data/processed/micross_mps_smoke_01 --graph data/processed/micross_mps_smoke_01/service_adjacency_1m.npz --labels data/processed/micross_mps_smoke_01/entry_failure_v1.csv --output-dir artifacts/entry_failure_mps_v1 --epochs 5 --device mps
 ```
 
 Outputs include `.events.csv` and `.schema.json`, recording event boundaries,
@@ -60,7 +60,7 @@ event-split details in the experiment settings or appendix.
 
 ## Earlier single-minute exploratory labels
 
-The model is unchanged. `scripts/label_micross.py` reads cached features and
+The model is unchanged. `scripts/run_micross.py label` reads cached features and
 creates an independent label CSV plus `.schema.json`. Pass the CSV with
 `--labels` to the trainer or pipeline; omitting it preserves the old baseline.
 
@@ -81,10 +81,29 @@ attributed failure windows. Existing chronological splits remain window-level.
 Local commands (reuse the completed preprocessing and temporal graph):
 
 ```bash
-.venv/bin/python scripts/label_micross.py --data-dir data/processed/micross_mps_smoke_01 --output data/processed/micross_mps_smoke_01/sla_labels_0999.csv --error-rate-threshold 0.999
-.venv/bin/python scripts/train_micross.py --data-dir data/processed/micross_mps_smoke_01 --graph data/processed/micross_mps_smoke_01/service_adjacency_1m.npz --labels data/processed/micross_mps_smoke_01/sla_labels_0999.csv --output-dir artifacts/micross_sla_mps_01 --epochs 1 --device mps
+.venv/bin/python scripts/run_micross.py label --data-dir data/processed/micross_mps_smoke_01 --output data/processed/micross_mps_smoke_01/sla_labels_0999.csv --error-rate-threshold 0.999
+.venv/bin/python scripts/run_micross.py train --data-dir data/processed/micross_mps_smoke_01 --graph data/processed/micross_mps_smoke_01/service_adjacency_1m.npz --labels data/processed/micross_mps_smoke_01/sla_labels_0999.csv --output-dir artifacts/micross_sla_mps_01 --epochs 1 --device mps
 ```
 
 The label command refuses to overwrite an existing output. Historical model
 artifacts remain valid for their original labels and should not be compared
 directly against new-label metrics.
+
+
+## Implementation boundaries and remaining checks
+
+The task remains next-minute failure-state prediction, including ongoing events.
+Injection metadata is never a model input. Two GCN layers and a GRU consume
+[B,T,N,F] features and [B,T,N,N] graphs. The graph is symmetric; masking replaces
+standardized service features with zero (training mean) and ranks probability
+reductions. This measures model sensitivity, not proven causal effects or an
+exact reproduction of the paper's permutation procedure.
+
+Before architecture comparisons, freeze the label thresholds and split, audit
+source timezone and event/root evidence, and check label sensitivity. Compare
+against persistence/error-rate, GRU and tabular baselines. Root coverage is
+small; report event counts and ties. Resume training and standalone checkpoint
+inference are not implemented. Other datasets are deferred.
+
+Paper reference: https://doi.org/10.1145/3629526.3645047 . This project reproduces
+the framework, not the published numerical results or an identical SLA protocol.

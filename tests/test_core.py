@@ -8,7 +8,7 @@ import numpy as np
 import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-from data.splits import chronological_split
+from data.dataset import chronological_split
 from models.gnn_gru import InstantOpsGNNGRU
 from rca.ranking import masking_importance
 from training.metrics import average_precision, rca_metrics
@@ -50,7 +50,7 @@ class WindowAdapterTests(unittest.TestCase):
         import tempfile
         from datetime import datetime, timedelta, timezone
 
-        from data.windows import GraphWindowDataset
+        from data.dataset import GraphWindowDataset
 
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

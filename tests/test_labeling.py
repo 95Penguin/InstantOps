@@ -9,9 +9,9 @@ from pathlib import Path
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-from data.labeling.micross import write_sla_labels
-from data.preprocessing.prepare_micross import Injection
-from data.windows import GraphWindowDataset
+from data.labels import write_sla_labels
+from data.prepare import Injection
+from data.dataset import GraphWindowDataset
 
 
 class LabelTests(unittest.TestCase):
@@ -58,7 +58,7 @@ class LabelTests(unittest.TestCase):
 
     def test_purge_removes_crossing_event_and_confirmation_leakage(self):
         from types import SimpleNamespace
-        from data.splits import purged_event_split
+        from data.dataset import purged_event_split
         data = SimpleNamespace(sample_indices=list(range(4, 104)), bucket_seconds=60,
                                timestamp_epochs=list(range(0, 106*60, 60)), history=5)
         schema = {"label_lookahead_minutes": 2,

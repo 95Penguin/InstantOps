@@ -13,7 +13,7 @@ from unittest.mock import Mock, patch
 from zipfile import ZipFile
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-from data.preprocessing import prepare_micross as module
+from data import prepare as module
 
 
 def csv_text(messages):

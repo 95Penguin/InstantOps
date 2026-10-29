@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import subprocess
 import sys
 from pathlib import Path
@@ -11,7 +12,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from data.paths import (
+from data.config import (
     MICROSS_OUTPUT_DIR,
     MICROSS_PROCESSED_DIR,
     MICROSS_RAW_DIR,
@@ -20,7 +21,7 @@ from data.paths import (
 )
 
 
-def parse_args() -> argparse.Namespace:
+def pipeline_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "micross_root",
@@ -47,13 +48,13 @@ def parse_args() -> argparse.Namespace:
     return args
 
 
-def main() -> int:
-    args = parse_args()
+def pipeline_main() -> int:
+    args = pipeline_args()
     root = resolve_micross_root(args.micross_root)
     data = args.data_dir.expanduser().resolve()
 
     def run(script, *arguments):
-        command = [sys.executable, str(ROOT / "scripts" / script), *map(str, arguments)]
+        command = [sys.executable, str(Path(__file__).resolve()), {"prepare_micross.py": "prepare", "build_micross_graph.py": "graph", "train_micross.py": "train"}[script], *map(str, arguments)]
         print("Running:", " ".join(command), flush=True)
         subprocess.run(command, check=True, cwd=ROOT)
 
@@ -63,8 +64,6 @@ def main() -> int:
         return 0
     if not args.skip_prepare:
         run("prepare_micross.py", root, "--output", data, "--source-timezone", args.source_timezone)
-    import json
-
     schema = json.loads((data / "feature_schema.json").read_text())
     if schema.get("source_timezone", "UTC") != args.source_timezone:
         raise ValueError("source timezone differs from cached data; regenerate preprocessing")
@@ -105,6 +104,121 @@ def main() -> int:
     )
     return 0
 
+
+
+#!/usr/bin/env python3
+"""Train the shared GNN-GRU pipeline on the MicroSS adapter."""
+
+
+
+
+def train_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--data-dir", type=Path, default=MICROSS_PROCESSED_DIR)
+    parser.add_argument("--labels", type=Path, help="Explicit label CSV; default preserves injection-start baseline")
+    parser.add_argument("--adjacency-npy", "--graph", dest="adjacency_npy", type=Path)
+    parser.add_argument("--rca-method", choices=("masking", "node-head"), default="masking")
+    parser.add_argument("--output-dir", type=Path, default=MICROSS_OUTPUT_DIR)
+    parser.add_argument("--history", type=int, default=5)
+    parser.add_argument("--epochs", type=int, default=20)
+    parser.add_argument("--batch-size", type=int, default=128)
+    parser.add_argument("--learning-rate", type=float, default=1e-3)
+    parser.add_argument("--node-loss-weight", type=float, default=1.0)
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--device", default="auto", choices=("auto", "cpu", "mps", "cuda"))
+    args = parser.parse_args()
+    if args.adjacency_npy and args.adjacency_npy.suffix not in {".npy", ".npz"}:
+        parser.error("graph must be a .npy static matrix or .npz temporal graph")
+    if args.history < 1 or args.epochs < 1 or args.batch_size < 1:
+        parser.error("history, epochs, and batch-size must be positive")
+    if args.learning_rate <= 0 or args.node_loss_weight < 0:
+        parser.error("learning-rate must be positive and node-loss-weight nonnegative")
+    return args
+
+
+def train_main() -> int:
+    import numpy as np
+    from constants import SERVICES
+    from data.dataset import MicrossWindowDataset
+    from training.experiment import run_training
+
+    args = train_args()
+    adjacency = (
+        np.load(args.adjacency_npy)
+        if args.adjacency_npy and args.adjacency_npy.suffix == ".npy"
+        else np.eye(len(SERVICES), dtype=np.float32)
+    )
+    source = (
+        str(args.adjacency_npy)
+        if args.adjacency_npy
+        else "identity matrix (no service edges); temporal-only baseline"
+    )
+    dataset = MicrossWindowDataset(
+        args.data_dir / "service_features_1m.csv",
+        args.labels or args.data_dir / "next_minute_labels.csv",
+        adjacency=adjacency,
+        history=args.history,
+        graph_path=args.adjacency_npy
+        if args.adjacency_npy and args.adjacency_npy.suffix == ".npz"
+        else None,
+    )
+    definition = "next-minute GAIA injection-start proxy"
+    if args.labels:
+        schema_path = args.labels.with_suffix(".schema.json")
+        if not schema_path.is_file():
+            raise ValueError(f"label schema missing: {schema_path}")
+        definition = json.loads(schema_path.read_text())
+    run_training(dataset, args, source, definition)
+    return 0
+
+
+
+"""Relabel cached telemetry without rebuilding features or graphs."""
+
+
+def label_main():
+    from constants import SERVICES
+    from data.labels import write_sla_labels
+    from data.prepare import load_injections
+
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--data-dir", type=Path, required=True)
+    parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--run-dir", type=Path, default=ROOT / "data/MicroSS/run")
+    parser.add_argument("--error-rate-threshold", type=float, required=True)
+    parser.add_argument("--min-entry-spans", type=int, default=1)
+    parser.add_argument("--consecutive-minutes", type=int, default=1)
+    parser.add_argument("--max-injection-seconds", type=float)
+    parser.add_argument("--entry-services", nargs="+", default=["webservice1", "webservice2"])
+    args = parser.parse_args()
+    schema = json.loads((args.data_dir / "feature_schema.json").read_text())
+    if any(p.exists() for p in (args.output, args.output.with_suffix(".schema.json"), args.output.with_suffix(".events.csv"))):
+        parser.error("output exists; choose a new path to preserve prior experiments")
+    injections = load_injections(args.run_dir, schema.get("source_timezone", "UTC"))
+    report = write_sla_labels(
+        args.data_dir / "service_features_1m.csv", args.output,
+        args.output.with_suffix(".schema.json"), SERVICES, injections,
+        args.entry_services, args.error_rate_threshold, args.min_entry_spans,
+        consecutive_minutes=args.consecutive_minutes,
+        max_injection_seconds=args.max_injection_seconds,
+    )
+    print(json.dumps({k: v for k, v in report.items() if k != "events"}, indent=2))
+
+
+
+COMMANDS = {"run": pipeline_main, "train": train_main, "label": label_main}
+
+def main():
+    if len(sys.argv) > 1 and sys.argv[1] in ("prepare", "graph"):
+        command = sys.argv.pop(1)
+        if command == "prepare":
+            from data.prepare import main as action
+        else:
+            from data.graph import main as action
+        return action()
+    if len(sys.argv) > 1 and sys.argv[1] in COMMANDS:
+        return COMMANDS[sys.argv.pop(1)]()
+    return pipeline_main()
 
 if __name__ == "__main__":
     raise SystemExit(main())

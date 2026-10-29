@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import csv
+import json
+from constants import SERVICES
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -268,3 +270,120 @@ class GraphWindowDataset(Dataset[dict[str, torch.Tensor]]):
                                            not self.failure_targets[end] or bool(node_targets.any()))
             ),
         }
+
+
+FEATURE_COLUMNS = (
+    "metric_cpu_mean",
+    "metric_memory_mean",
+    "metric_network_mean",
+    "metric_disk_mean",
+    "metric_other_mean",
+    "metric_cpu_series_count",
+    "metric_memory_series_count",
+    "metric_network_series_count",
+    "metric_disk_series_count",
+    "metric_other_series_count",
+    "trace_span_count",
+    "trace_5xx_count",
+    "trace_5xx_rate",
+    "trace_duration_mean_ms",
+)
+
+
+class MicrossWindowDataset(GraphWindowDataset):
+    """Use GAIA service names and injection-start proxy labels."""
+
+    def __init__(
+        self,
+        feature_csv: str | Path,
+        label_csv: str | Path,
+        adjacency: np.ndarray | torch.Tensor,
+        history: int = 5,
+        services: Sequence[str] = SERVICES,
+        bucket_seconds: int = 60,
+        graph_path: str | Path | None = None,
+    ) -> None:
+        schema_path = Path(feature_csv).parent / "feature_schema.json"
+        schema = json.loads(schema_path.read_text()) if schema_path.exists() else {}
+        if schema and tuple(schema["services"]) != tuple(services):
+            raise ValueError("feature schema service order mismatch")
+        feature_columns = tuple(schema.get("feature_columns", FEATURE_COLUMNS))
+        super().__init__(
+            feature_csv,
+            label_csv,
+            adjacency,
+            services=services,
+            feature_columns=feature_columns,
+            history=history,
+            bucket_seconds=bucket_seconds,
+        )
+
+        if graph_path is not None:
+            with np.load(graph_path, allow_pickle=False) as graph:
+                if tuple(graph["services"].tolist()) != self.services:
+                    raise ValueError("dynamic graph service order mismatch")
+                if not np.array_equal(graph["timestamps"], self.timestamp_epochs):
+                    raise ValueError("dynamic graph timestamps do not match feature panel")
+                adjacency = graph["adjacency"]
+                if adjacency.shape != (
+                    len(self.timestamps),
+                    len(self.services),
+                    len(self.services),
+                ):
+                    raise ValueError("invalid dynamic adjacency shape")
+                if not np.isfinite(adjacency).all() or (adjacency < 0).any():
+                    raise ValueError("invalid dynamic adjacency values")
+                self.adjacency = torch.from_numpy(adjacency.astype(np.float32))
+
+
+def chronological_split(
+    sample_indices: list[int],
+) -> tuple[list[int], list[int], list[int]]:
+    """Split ordered sample endpoints into 70/15/15 train/validation/test ranges."""
+    count = len(sample_indices)
+    if count < 3:
+        raise ValueError(f"need at least 3 usable windows for train/val/test; found {count}")
+    train_end = min(max(1, int(count * 0.70)), count - 2)
+    validation_end = min(max(train_end + 1, int(count * 0.85)), count - 1)
+    splits = (
+        sample_indices[:train_end],
+        sample_indices[train_end:validation_end],
+        sample_indices[validation_end:],
+    )
+    if any(not split for split in splits):
+        raise ValueError("chronological split produced an empty partition")
+    return splits
+
+
+def purged_event_split(dataset, label_schema):
+    """Chronological split with disjoint input/evidence intervals and incidents.
+
+    Events crossing a fixed boundary are excluded in all partitions, including
+    windows whose history touches them. Confirmation lookahead is purged too.
+    """
+    raw = chronological_split(dataset.sample_indices)
+    seconds = dataset.bucket_seconds
+    times = dataset.timestamp_epochs
+    cuts = [times[part[0]] + seconds for part in raw[1:]]
+    crossing = [event for event in label_schema.get("events", [])
+                if any(event["start_epoch"] < cut < event["end_epoch_exclusive"] for cut in cuts)]
+    lookahead = label_schema.get("label_lookahead_minutes", 1)
+    result = []
+    for part, lower, upper in zip(raw, [float('-inf'), *cuts], [*cuts, float('inf')]):
+        keep = []
+        for end in part:
+            left = times[end - dataset.history + 1]
+            right = times[end] + (lookahead + 1) * seconds
+            if left < lower or right > upper:
+                continue
+            if any(left < e["end_epoch_exclusive"] and right > e["start_epoch"] for e in crossing):
+                continue
+            keep.append(end)
+        if not keep:
+            raise ValueError("event purge leaves an empty partition")
+        result.append(keep)
+    return tuple(result), {
+        "policy": "purged_events", "boundary_epochs": cuts,
+        "crossing_events_excluded": [e["event_id"] for e in crossing],
+        "dropped_windows": [len(a)-len(b) for a,b in zip(raw,result)],
+    }

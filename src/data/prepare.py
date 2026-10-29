@@ -27,8 +27,8 @@ from typing import Iterator, TextIO
 from zoneinfo import ZoneInfo
 
 from constants import SERVICES
-from data.micross_schema import COUNTERS, FEATURES, LOG_FEATURES, METRICS
-from data.paths import MICROSS_PROCESSED_DIR, MICROSS_RAW_DIR, resolve_micross_root
+from data.config import COUNTERS, FEATURES, LOG_FEATURES, METRICS
+from data.config import MICROSS_PROCESSED_DIR, MICROSS_RAW_DIR, resolve_micross_root
 from data.preflight import check_micross_inputs
 
 SERVICE_PATTERN = re.compile(r"^(" + "|".join(SERVICES) + r")_(.+)$")

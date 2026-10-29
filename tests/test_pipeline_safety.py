@@ -16,7 +16,7 @@ from torch.utils.data import DataLoader
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from data.preflight import check_split_archive
-from data.windows import GraphWindowDataset
+from data.dataset import GraphWindowDataset
 from rca.ranking import masking_importance
 from training.engine import run_epoch
 

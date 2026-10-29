@@ -19,7 +19,7 @@ import numpy as np
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 from constants import SERVICES
-from data.micross_schema import FEATURES, METRICS
+from data.config import FEATURES, METRICS
 
 
 def csv_text(fields, rows):
@@ -32,7 +32,7 @@ def csv_text(fields, rows):
 
 class TimezoneTests(unittest.TestCase):
     def test_naive_source_zone_does_not_depend_on_host(self):
-        from data.preprocessing.prepare_micross import parse_trace_timestamp
+        from data.prepare import parse_trace_timestamp
 
         utc = parse_trace_timestamp("2021-07-01 12:00:00", "UTC")
         beijing = parse_trace_timestamp("2021-07-01 12:00:00", "Asia/Shanghai")
@@ -42,7 +42,7 @@ class TimezoneTests(unittest.TestCase):
 class TraceTimezoneTests(unittest.TestCase):
     @unittest.skipUnless(shutil.which("7zz") or shutil.which("7z"), "7-Zip required")
     def test_trace_aggregation_uses_configured_timezone(self):
-        from data.preprocessing.prepare_micross import aggregate_traces
+        from data.prepare import aggregate_traces
 
         with tempfile.TemporaryDirectory() as temporary:
             archive = Path(temporary) / "trace.zip"
