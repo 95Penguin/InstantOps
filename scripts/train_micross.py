@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from pathlib import Path
 
@@ -20,6 +21,7 @@ from training.experiment import run_training
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--data-dir", type=Path, default=MICROSS_PROCESSED_DIR)
+    parser.add_argument("--labels", type=Path, help="Explicit label CSV; default preserves injection-start baseline")
     parser.add_argument("--adjacency-npy", "--graph", dest="adjacency_npy", type=Path)
     parser.add_argument("--rca-method", choices=("masking", "node-head"), default="masking")
     parser.add_argument("--output-dir", type=Path, default=MICROSS_OUTPUT_DIR)
@@ -54,14 +56,20 @@ def main() -> int:
     )
     dataset = MicrossWindowDataset(
         args.data_dir / "service_features_1m.csv",
-        args.data_dir / "next_minute_labels.csv",
+        args.labels or args.data_dir / "next_minute_labels.csv",
         adjacency=adjacency,
         history=args.history,
         graph_path=args.adjacency_npy
         if args.adjacency_npy and args.adjacency_npy.suffix == ".npz"
         else None,
     )
-    run_training(dataset, args, source, "next-minute GAIA injection-start proxy")
+    definition = "next-minute GAIA injection-start proxy"
+    if args.labels:
+        schema_path = args.labels.with_suffix(".schema.json")
+        if not schema_path.is_file():
+            raise ValueError(f"label schema missing: {schema_path}")
+        definition = json.loads(schema_path.read_text())
+    run_training(dataset, args, source, definition)
     return 0
 
 

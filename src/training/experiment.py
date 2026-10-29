@@ -7,11 +7,12 @@ import copy
 import json
 from pathlib import Path
 
+import numpy as np
 import torch
 from torch import nn
 from torch.utils.data import DataLoader, Subset
 
-from data.splits import chronological_split
+from data.splits import chronological_split, purged_event_split
 from data.windows import GraphWindowDataset
 from models.gnn_gru import InstantOpsGNNGRU
 from rca.ranking import masking_importance
@@ -26,7 +27,7 @@ from training.metrics import classification_metrics, rca_metrics
 
 
 def run_training(
-    dataset: GraphWindowDataset, args: argparse.Namespace, graph_source: str, label_definition: str
+    dataset: GraphWindowDataset, args: argparse.Namespace, graph_source: str, label_definition: str | dict
 ) -> dict:
     """Train one dataset with train-only normalization and held-out evaluation.
 
@@ -41,7 +42,30 @@ def run_training(
     dataset = copy.copy(dataset)
     seed_everything(args.seed)
     device = choose_device(args.device)
-    train_ends, val_ends, test_ends = chronological_split(dataset.sample_indices)
+    split_report = {"policy": "chronological"}
+    if isinstance(label_definition, dict) and label_definition.get("split_policy") == "purged_events":
+        if dataset.adjacency.ndim != 3:
+            raise ValueError("event protocol requires the temporal graph; cached static graph may use later evidence")
+        (train_ends, val_ends, test_ends), split_report = purged_event_split(dataset, label_definition)
+    else:
+        train_ends, val_ends, test_ends = chronological_split(dataset.sample_indices)
+    baseline = None
+    if isinstance(label_definition, dict):
+        entry = [dataset.services.index(s) for s in label_definition["entry_services"]]
+        count_col = dataset.feature_columns.index("trace_span_count")
+        error_col = dataset.feature_columns.index("trace_5xx_count")
+        current = dataset.features[test_ends][:, entry, :]
+        counts = current[:, :, count_col].sum(axis=1)
+        errors = current[:, :, error_col].sum(axis=1)
+        observed = counts >= label_definition["min_entry_spans"]
+        rates = errors / np.maximum(counts, 1)
+        flags = rates >= label_definition["error_rate_threshold"]
+        baseline = {
+            "definition": "current-minute entry error threshold predicts next-minute failure; no future confirmation",
+            "evaluated_windows": int(observed.sum()),
+            "metrics": classification_metrics(dataset.failure_targets[test_ends][observed], flags[observed].astype(float))
+                if observed.any() else None,
+        }
     mean, scale = fit_feature_scaler(dataset, train_ends)
     train_index = {end: index for index, end in enumerate(dataset.sample_indices)}
     subsets = [
@@ -53,11 +77,13 @@ def run_training(
         for index, subset in enumerate(subsets)
     ]
     train_labels = torch.tensor(
-        [int(dataset.node_targets[end].max()) for end in train_ends], dtype=torch.float32
+        [int(dataset.failure_targets[end]) for end in train_ends], dtype=torch.float32
     )
     if train_labels.unique().numel() < 2:
         raise ValueError("training split needs both normal and fault windows")
     train_node_labels = torch.from_numpy(dataset.node_targets[train_ends])
+    known_roots = (dataset.failure_targets[train_ends] == 0) | (dataset.node_targets[train_ends].max(axis=1) > 0)
+    train_node_labels = train_node_labels[known_roots]
     failure_loss_fn = nn.CrossEntropyLoss(
         weight=torch.tensor(
             [1.0, class_pos_weight(train_labels, torch.device("cpu")).item()],
@@ -129,12 +155,11 @@ def run_training(
                 .cpu()
                 .numpy()
             )
-        import numpy as np
-
         test_output["node_scores"] = np.concatenate(scores)
     predictions = []
     test_times = [dataset.timestamps[end] for end in test_ends]
-    for index, timestamp in enumerate(test_times):
+    test_event_ids = [dataset.event_ids[end] for end in test_ends]
+    for index, (timestamp, event_id) in enumerate(zip(test_times, test_event_ids)):
         scores = test_output["node_scores"][index]
         order = sorted(range(len(dataset.services)), key=lambda node: (-float(scores[node]), node))
         predictions.append(
@@ -142,6 +167,7 @@ def run_training(
                 "input_minute_utc": timestamp,
                 "failure_probability": float(test_output["probabilities"][index]),
                 "failure_target": int(test_output["labels"][index]),
+                "event_id": event_id,
                 "rca_method": method,
                 "true_services": [
                     service
@@ -154,11 +180,35 @@ def run_training(
                 ],
             }
         )
+    event_rows: dict[str, list[int]] = {}
+    for row, event_id in enumerate(test_event_ids):
+        if event_id and test_output["node_targets"][row].sum() > 0:
+            event_rows.setdefault(event_id, []).append(row)
+    event_targets = []
+    event_scores = []
+    for event_id, rows in event_rows.items():
+        targets = test_output["node_targets"][rows]
+        if not np.all(targets == targets[0]):
+            raise ValueError(f"root labels change within failure event {event_id}")
+        event_targets.append(targets[0])
+        event_scores.append(test_output["node_scores"][rows].mean(axis=0))
+    event_rca = rca_metrics(
+        np.stack(event_targets) if event_targets else np.empty((0, len(dataset.services))),
+        np.stack(event_scores) if event_scores else np.empty((0, len(dataset.services))),
+    )
+    event_rca["positive_events"] = event_rca.pop("positive_windows")
+    event_rca["aggregation"] = "mean scores over available attributed windows in each event; retrospective"
     (args.output_dir / "predictions.jsonl").write_text(
         "".join(json.dumps(row) + "\n" for row in predictions)
     )
     metrics = {
         "rca_method": method,
+        "split_protocol": split_report,
+        "current_error_baseline": baseline,
+        "root_label_coverage": {
+            "test_failure_windows": int(test_output["labels"].sum()),
+            "test_attributed_failure_windows": int((test_output["node_targets"].max(axis=1) > 0).sum()),
+        },
         "rca_score_definition": (
             "nonnegative target-probability drop" if method == "masking" else "node sigmoid"
         ),
@@ -178,7 +228,7 @@ def run_training(
             for key, value in vars(args).items()
         },
         "split_positive_samples": {
-            name: int(dataset.node_targets[ends].max(axis=1).sum())
+            name: int(dataset.failure_targets[ends].sum())
             for name, ends in zip(
                 ("train", "validation", "test"), (train_ends, val_ends, test_ends)
             )
@@ -188,6 +238,7 @@ def run_training(
             test_output["labels"], test_output["probabilities"]
         ),
         "root_cause_proxy": rca_metrics(test_output["node_targets"], test_output["node_scores"]),
+        "root_cause_event_proxy": event_rca,
         "graph_source": graph_source,
         "label_definition": label_definition,
         "split_sizes": {

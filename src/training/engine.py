@@ -81,10 +81,14 @@ def run_epoch(
         adjacency = batch["adjacency"].to(device)
         labels = batch["failure_target"].to(device)
         node_targets = batch["node_targets"].to(device)
+        node_valid = batch.get("node_label_valid", torch.ones_like(labels, dtype=torch.bool)).to(device)
         with torch.set_grad_enabled(training):
             output = model(features, adjacency)
             failure_loss = failure_loss_fn(output["failure_logits"], labels)
-            node_loss = node_loss_fn(output["node_logits"], node_targets)
+            node_loss = (
+                node_loss_fn(output["node_logits"][node_valid], node_targets[node_valid])
+                if node_valid.any() else output["node_logits"].sum() * 0
+            )
             loss = failure_loss + node_loss_weight * node_loss
             if not torch.isfinite(loss):
                 raise ValueError("non-finite loss; check features and class weights")
@@ -99,8 +103,9 @@ def run_epoch(
         denominator = float(weight[labels].sum().item()) if weight is not None else size
         failure_numerator += failure_loss.item() * denominator
         failure_denominator += denominator
-        node_numerator += node_loss.item() * node_targets.numel()
-        node_denominator += node_targets.numel()
+        node_elements = node_targets[node_valid].numel()
+        node_numerator += node_loss.item() * node_elements
+        node_denominator += node_elements
         probabilities = output["failure_logits"].softmax(dim=-1)[:, 1]
         collected["labels"].append(labels.detach().cpu().numpy())
         collected["probabilities"].append(probabilities.detach().cpu().numpy())

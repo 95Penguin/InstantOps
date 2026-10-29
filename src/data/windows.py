@@ -17,8 +17,8 @@ class GraphWindowDataset(Dataset[dict[str, torch.Tensor]]):
     Each item contains:
       * ``node_features``: [history, services, features], float32
       * ``adjacency``: [history, services, services], float32
-      * ``failure_target``: scalar; union of the adapter's binary node targets
-      * ``node_targets``: [services]; adapter-defined binary node labels
+      * ``failure_target``: scalar application-failure label
+      * ``node_targets``: [services]; root-cause service labels
 
     The adjacency matrix is supplied by the caller. The repository includes a
     trace-derived graph builder, but its full-dataset coverage still needs
@@ -58,7 +58,7 @@ class GraphWindowDataset(Dataset[dict[str, torch.Tensor]]):
             raise ValueError("adjacency weights must be nonnegative")
 
         features_by_time = self._read_features(Path(feature_csv))
-        labels_by_time, target_times = self._read_labels(Path(label_csv))
+        labels_by_time, failure_by_time, target_times = self._read_labels(Path(label_csv))
         self.timestamps = sorted(features_by_time)
         self.timestamp_epochs = [self._parse_timestamp(value) for value in self.timestamps]
         available_timestamps = set(self.timestamps)
@@ -74,11 +74,16 @@ class GraphWindowDataset(Dataset[dict[str, torch.Tensor]]):
                 for t in self.timestamps
             ]
         )
+        self.failure_targets = np.array(
+            [failure_by_time.get(t, 0) for t in self.timestamps], dtype=np.int64
+        )
+        self.event_ids = [self._event_by_time.get(t, "") for t in self.timestamps]
         self.sample_indices = [
             end
             for end in range(history - 1, len(self.timestamps))
             if self._is_contiguous(end)
             and self.timestamps[end] in labels_by_time
+            and self._label_valid.get(self.timestamps[end], True)
             and target_times[self.timestamps[end]] in available_timestamps
             and self.valid_minutes[end - history + 1 : end + 1].all()
             and self.valid_minutes[time_indices[target_times[self.timestamps[end]]]]
@@ -136,19 +141,27 @@ class GraphWindowDataset(Dataset[dict[str, torch.Tensor]]):
             raise ValueError("feature panel must contain every service at each timestamp")
         return values
 
-    def _read_labels(self, path: Path) -> tuple[dict[str, np.ndarray], dict[str, str]]:
+    def _read_labels(
+        self, path: Path
+    ) -> tuple[dict[str, np.ndarray], dict[str, int], dict[str, str]]:
         service_indices = {name: index for index, name in enumerate(self.services)}
         labels: dict[str, np.ndarray] = {}
+        failures: dict[str, int] = {}
+        self._label_valid: dict[str, bool] = {}
+        self._root_label_valid: dict[str, bool] = {}
+        self._event_by_time: dict[str, str] = {}
         target_times: dict[str, str] = {}
         seen: dict[str, set[int]] = {}
         with path.open("r", encoding="utf-8-sig", newline="") as handle:
             reader = csv.DictReader(handle)
-            required = {
-                "input_minute_utc",
-                "target_minute_utc",
-                "service",
-                "fault_next_minute",
-            }
+            base = {"input_minute_utc", "target_minute_utc", "service"}
+            fields = set(reader.fieldnames or ())
+            joint_schema = {"failure_next_minute", "root_cause_next_minute"}.issubset(fields)
+            required = base | (
+                {"failure_next_minute", "root_cause_next_minute"}
+                if joint_schema
+                else {"fault_next_minute"}
+            )
             if not reader.fieldnames or not required.issubset(reader.fieldnames):
                 missing = sorted(required - set(reader.fieldnames or ()))
                 raise ValueError(f"label CSV is missing columns: {missing}")
@@ -170,19 +183,42 @@ class GraphWindowDataset(Dataset[dict[str, torch.Tensor]]):
                 if timestamp in target_times and target_times[timestamp] != target_time:
                     raise ValueError("inconsistent target timestamp across services")
                 target_times[timestamp] = target_time
+                failure_value = row["failure_next_minute"] if joint_schema else row["fault_next_minute"]
+                root_value = row["root_cause_next_minute"] if joint_schema else row["fault_next_minute"]
                 try:
-                    label = float(row["fault_next_minute"])
+                    failure = float(failure_value)
+                    root = float(root_value)
                 except (TypeError, ValueError) as exc:
-                    raise ValueError(f"invalid fault label: {row['fault_next_minute']!r}") from exc
-                if label not in (0.0, 1.0):
-                    raise ValueError(f"fault labels must be 0 or 1, got {label}")
+                    raise ValueError("invalid binary label") from exc
+                if failure not in (0.0, 1.0) or root not in (0.0, 1.0):
+                    raise ValueError("failure and root-cause labels must be 0 or 1")
+                if joint_schema and timestamp in failures and failures[timestamp] != int(failure):
+                    raise ValueError("inconsistent application failure label across services")
+                failures[timestamp] = int(failure) if joint_schema else max(failures.get(timestamp, 0), int(failure))
+                valid = self._to_float(row.get("entry_observed", "1"), "entry_observed")
+                if valid not in (0, 1):
+                    raise ValueError("entry_observed must be binary")
+                self._label_valid[timestamp] = self._label_valid.get(timestamp, True) and bool(valid)
+                root_valid = self._to_float(
+                    row.get("root_label_valid", "1"), "root_label_valid"
+                )
+                if root_valid not in (0, 1):
+                    raise ValueError("root_label_valid must be binary")
+                if "root_label_valid" in fields:
+                    self._root_label_valid[timestamp] = (
+                        self._root_label_valid.get(timestamp, True) and bool(root_valid)
+                    )
+                event_id = row.get("event_id", "")
+                if timestamp in self._event_by_time and self._event_by_time[timestamp] != event_id:
+                    raise ValueError("inconsistent event_id across services")
+                self._event_by_time[timestamp] = event_id
                 target = labels.setdefault(
                     timestamp, np.zeros(len(self.services), dtype=np.float32)
                 )
-                target[service_index] = label
+                target[service_index] = root
         if any(len(indices) != len(self.services) for indices in seen.values()):
             raise ValueError("label panel must contain every service at each labeled timestamp")
-        return labels, target_times
+        return labels, failures, target_times
 
     @staticmethod
     def _to_float(value: str, column: str) -> float:
@@ -225,6 +261,10 @@ class GraphWindowDataset(Dataset[dict[str, torch.Tensor]]):
                 if self.adjacency.ndim == 3
                 else self.adjacency.unsqueeze(0).expand(self.history, -1, -1)
             ),
-            "failure_target": node_targets.max().to(torch.long),
+            "failure_target": torch.tensor(self.failure_targets[end], dtype=torch.long),
             "node_targets": node_targets,
+            "node_label_valid": torch.tensor(
+                self._root_label_valid.get(self.timestamps[end],
+                                           not self.failure_targets[end] or bool(node_targets.any()))
+            ),
         }

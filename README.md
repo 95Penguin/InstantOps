@@ -1,5 +1,10 @@
 # InstantOps reproduction
 
+Local business-failure relabeling is available without rebuilding telemetry or
+changing the model: see [label definitions and local commands](docs/labels.md).
+Pass `--labels` explicitly to select it; default commands below retain the
+injection-start baseline.
+
 This repository is a workflow-level reproduction of **InstantOps: A Joint Approach to System Failure Prediction and Root Cause Identification in Microservices Cloud-Native Applications** (ICPE 2024). It is an independent implementation; it does not claim to reproduce the paper's reported scores.
 
 ## Environment
